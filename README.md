@@ -111,12 +111,12 @@ cde, diplomacy, hardfloat, rocketchip, macros 등 핵심 모듈이 자동으로 
 
 ## ⌨️ 4. 주요 명령어 사용법 (Makefile)
 터미널에서 아래 명령어를 사용하여 개발 사이클을 관리하세요.
-1. make up      Docker 컨테이너 실행 및 환경 빌드
-2. make shell   컨테이너 내부 터미널 접속 (디버깅/수동 조작용)
-3. make setup   로켓칩 핵심 라이브러리 로컬 빌드 (최초 1회 필수)
-4. make gen     Chisel 코드를 SystemVerilog로 컴파일
-5. make clean   SBT 빌드 부산물 및 생성된 Verilog 파일 삭제 (가벼운 초기화)
-6. make down    컨테이너 실행 종료
+1. ```make up```:      Docker 컨테이너 실행 및 환경 빌드
+2. ```make shell```:   컨테이너 내부 터미널 접속 (디버깅/수동 조작용)
+3. ```make setup```:   로켓칩 핵심 라이브러리 로컬 빌드 (최초 1회 필수)
+4. ```make gen```:     Chisel 코드를 SystemVerilog로 컴파일
+5. ```make clean```:   SBT 빌드 부산물 및 생성된 Verilog 파일 삭제 (가벼운 초기화)
+6. ```make down```:    컨테이너 실행 종료
 
 ---
 

@@ -158,13 +158,7 @@ class RegisterFile extends Module {
     // ---- Interrupt Generator의 세 번째 쓰기 포트 (Event Detector & Zero-Copy Manager) ----
     // set_intflag: INT_FLAG_REG bit0 Set 펄스
     // rf_wen/rf_waddr/rf_wdata: Zero-Copy 주소 피드백 (명세서 상 0x30 = OUT_BASE_ADDR 고정)
-    //
-    // !! WARNING - 미해결 스펙 충돌 !!
-    // Interrupt Generator 명세서는 rf_waddr=0x30 을 "OUT_BASE_ADDR"라고 부르지만,
-    // 우리 RF 주소맵(RegMap)에서 0x30 은 WEIGHT2_ADDR 입니다.
-    // 이대로 합성하면 연산 완료마다 WEIGHT2_ADDR가 결과 주소로 덮어써지는 버그가 발생합니다.
-    // -> 팀 확인 전까지 아래 배선은 RegMap 원본(0x30=WEIGHT2_ADDR) 기준으로 그대로 연결해둠.
-    //    확인 후 (a) RF에 OUT_BASE_ADDR 전용 슬롯 추가 or (b) Interrupt Gen 쪽 주소 수정 중 택1 필요.
+
     val setIntFlag = Input(Bool())
     val irqWen     = Input(Bool())
     val irqWaddr   = Input(UInt(8.W))  // 명세서 그대로 8bit (0x30 등 byte addr)
@@ -190,11 +184,7 @@ class RegisterFile extends Module {
   val intFlagReg = RegInit(0.U(32.W)) // INT_FLAG_REG (W1C/Set 특수 로직)
 
   // STATUS_REG: Host에는 RO, 내용은 매 사이클 하드웨어가 조합 로직으로 생성
-  //   [0] busy         : Compute Initializer Unit(Main Brain FSM) 소스로 추정 (state =/= S_IDLE)
-  //                      -> 명세서 I/O 표에 명시적 busy 포트가 없어 확인 필요. 확정 전까지 io.busy는
-  //                         상위에서 그렇게 파생시켜 넣어준다고 가정.
   //   [1] global_stall : 확정 - Stall Generator의 RegNext(raw_stall) 그대로 연결
-  // TODO: Compute Timer 쪽에서 추가로 넣을 상태 비트 있는지 확인
   val statusReg = Wire(UInt(32.W))
   statusReg := Cat(0.U(30.W), io.globalStall, io.busy) // [0]=busy, [1]=global_stall
 

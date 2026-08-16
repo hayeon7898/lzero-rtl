@@ -126,7 +126,7 @@ class RegisterFileSpec extends AnyFlatSpec with ChiselScalatestTester with Match
     }
   }
 
-  it should "route Interrupt Generator zero-copy address write via irqWen (per current RegMap: 0x30=WEIGHT2_ADDR)" in {
+  it should "route Interrupt Generator zero-copy address write via irqWen to OUTPUT_ADDR (0x70)" in {
     test(new RegisterFile) { dut =>
       dut.io.fetchWorking.poke(false.B)
       dut.io.fetchWrEn.poke(false.B)
@@ -134,16 +134,14 @@ class RegisterFileSpec extends AnyFlatSpec with ChiselScalatestTester with Match
       dut.io.globalStall.poke(false.B)
       dut.io.setIntFlag.poke(false.B)
 
-      // Interrupt Generator: rf_waddr=0x30, rf_wdata = ib_write_addr | (1<<63)
+      // Interrupt Generator: rf_waddr=0x70(OUTPUT_ADDR), rf_wdata = ib_write_addr | (1<<63)
       dut.io.irqWen.poke(true.B)
-      dut.io.irqWaddr.poke(0x30.U)
+      dut.io.irqWaddr.poke(0x70.U)
       dut.io.irqWdata.poke((BigInt(1) << 63) | BigInt("1234", 16))
       dut.clock.step(1)
       dut.io.irqWen.poke(false.B)
 
-      // !! 주의: 현재 RegMap 기준 0x30 = weight2Addr 로 반영됨.
-      // Interrupt Generator 문서상 "OUT_BASE_ADDR" 의도와 충돌 - 팀 확인 후 수정 필요.
-      dut.io.pointers.weight2Addr.expect(((BigInt(1) << 63) | BigInt("1234", 16)).U)
+      dut.io.pointers.outputAddr.expect(((BigInt(1) << 63) | BigInt("1234", 16)).U)
     }
   }
 }

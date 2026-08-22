@@ -9,7 +9,7 @@
 ### ⚙️ Architecture 
 
 <p align="center">
-  <img src="docs/specs/overview/images/npu-overview-diagram-1.png" width="80%" alt="NPU 전체 아키텍처 다이어그램">
+  <img src="docs/specs/overview/images/npu-overview-diagram-1.png" width="90%" alt="NPU 전체 아키텍처 다이어그램">
 </p>
 
 #### Core Blocks
@@ -26,8 +26,8 @@
 | Module |Explanation| Source | Spec| Issue |
 | --- | --- | --- | --- |---|
 | **Rs1Decoder** | Shoot-and-Go ISA의 rs1(64bit) 전체 디코딩, `hw_enables` 서브필드 파싱 | [`Rs1Decoder.scala`](src/main/scala/npu/control/Rs1Decoder.scala) | [shoot-and-go-isa.md](docs/specs/control/shoot-and-go-isa.md) |-|
-| **RegisterFile** | AXI4-Lite MMIO, 3-way Multi Write-Port(Interrupt Gen/DMA/Host), Execution Lock, W1C | [`RegisterFile.scala`](src/main/scala/npu/control/RegisterFile.scala) | [register-file-mmio.md](docs/specs/control/register-file-mmio.md) |https://github.com/hayeon7898/lzero-rtl/issues/1|
-| **ComputeInitializerUnit** | Main Brain FSM: 명령 수신부터 연산 시작까지 6단계 오케스트레이션 | [`ComputeInitializerUnit.scala`](src/main/scala/npu/control/ComputeInitializerUnit.scala) | [compute-initializer-unit.md](docs/specs/control/compute-initializer-unit.md) |https://github.com/hayeon7898/lzero-rtl/issues/2|
+| **Register File** | AXI4-Lite MMIO, 3-way Multi Write-Port(Interrupt Gen/DMA/Host), Execution Lock, W1C | [`RegisterFile.scala`](src/main/scala/npu/control/RegisterFile.scala) | [register-file-mmio.md](docs/specs/control/register-file-mmio.md) |https://github.com/hayeon7898/lzero-rtl/issues/1|
+| **Compute Initializer Unit** | Main Brain FSM: 명령 수신부터 연산 시작까지 6단계 오케스트레이션 | [`ComputeInitializerUnit.scala`](src/main/scala/npu/control/ComputeInitializerUnit.scala) | [compute-initializer-unit.md](docs/specs/control/compute-initializer-unit.md) |https://github.com/hayeon7898/lzero-rtl/issues/2|
 | **MXU (Systolic Array)** | `MacUnit`/`MatMulUnit_16`/`DataOrchUnit_16`: 16x16 시스톨릭 어레이 | [`MatMul.scala`](src/main/scala/scalar/MatMul.scala) | [mxu-systolic-array.md](docs/specs/compute/mxu-systolic-array.md) |-|
 
 

@@ -139,6 +139,13 @@ object RegMap {
   val NUM_REGS = 32 // 0x00~0xF8 커버 (5bit index 여유있게)
 
   def idx(addr: UInt): UInt = addr(7, 3)
+
+  // DMA to RF Writer 512bit Beat -> 레지스터 인덱스 매핑 (명세서 4장 그대로)
+  val CHUNK0_IDX = Seq(INPUT_ADDR, WEIGHT1_ADDR, WEIGHT2_ADDR, QUANT_PARAM_ADDR,
+                        ANGLE_PARAM_ADDR, ACT_LUT_ADDR, EXP_LUT_ADDR, SCALE_LUT_ADDR)
+  val CHUNK1_IDX = Seq(ROPE_SIN_ADDR, ROPE_COS_ADDR, OUTPUT_ADDR, NORM_BUFF_ADDR,
+                        DIM0, DIM1, DIM2, DIM3)
+  val CHUNK2_IDX = Seq(DIM4) // 나머지 448bit는 136Byte 초과 더미, 하드웨어에서 무시
 }
 
 // ----------------------------------------------------------------------------
@@ -148,23 +155,23 @@ class RegisterFile extends Module {
   val io = IO(new Bundle {
     val axi = new Axi4LiteSlaveIO(RfParams.addrWidth, RfParams.dataWidth)
 
-    // ---- Command Fetcher(DMA)의 두 번째 쓰기 포트 ----
-    // fetch_working=1 인 동안 이 포트가 0x20~0xA0 영역 쓰기 권한을 독점함
-    val fetchWorking = Input(Bool())
-    val fetchWrEn    = Input(Bool())
-    val fetchWrAddr  = Input(UInt(RfParams.addrWidth.W)) // byte addr, RF 맵과 동일 체계
-    val fetchWrData  = Input(UInt(RfParams.dataWidth.W))
+    // ---- Command Fetcher(DMA to RF Writer)의 두 번째 쓰기 포트 ----
+    // 512bit(64Byte) 버스 + chunk_idx(0/1/2)로 한 번에 8개(beat2는 1개) 레지스터 동시에
+    val fetchWen      = Input(Bool())       // rf_wen
+    val fetchChunkIdx = Input(UInt(2.W))    // rf_chunk_idx (0,1,2)
+    val fetchWdata    = Input(UInt(512.W))  // rf_wdata (64Byte)
 
     // ---- Interrupt Generator의 세 번째 쓰기 포트 (Event Detector & Zero-Copy Manager) ----
     // set_intflag: INT_FLAG_REG bit0 Set 펄스
-    // rf_wen/rf_waddr/rf_wdata: Zero-Copy 주소 피드백 (명세서 상 0x30 = OUT_BASE_ADDR 고정)
-
+    // rf_wen/rf_waddr/rf_wdata: Zero-Copy 주소 피드백 (0x70 = OUTPUT_ADDR, 확정)
     val setIntFlag = Input(Bool())
     val irqWen     = Input(Bool())
-    val irqWaddr   = Input(UInt(8.W))  // 명세서 그대로 8bit (0x30 등 byte addr)
+    val irqWaddr   = Input(UInt(8.W))  // 명세서 그대로 8bit (0x70 등 byte addr)
     val irqWdata   = Input(UInt(64.W))
 
     // ---- 칩 전역 상태 입력 ----
+    // busy: Compute Init Unit 등에서 공급되는 레벨 신호. 연산 시작~종료까지 1 유지 후 0.
+    //       (소스가 어느 유닛이든 RF 입장에서는 레벨 신호로만 취급하면 됨 - 확정)
     val busy         = Input(Bool())       // Execution Lock 트리거
     val globalStall  = Input(Bool())       // STATUS_REG 조합 로직에 반영
 
@@ -184,6 +191,7 @@ class RegisterFile extends Module {
   val intFlagReg = RegInit(0.U(32.W)) // INT_FLAG_REG (W1C/Set 특수 로직)
 
   // STATUS_REG: Host에는 RO, 내용은 매 사이클 하드웨어가 조합 로직으로 생성
+  //   [0] busy         : 확정 - 연산 시작~종료까지 유지되는 레벨 신호 (소스 유닛 무관하게 그대로 사용)
   //   [1] global_stall : 확정 - Stall Generator의 RegNext(raw_stall) 그대로 연결
   val statusReg = Wire(UInt(32.W))
   statusReg := Cat(0.U(30.W), io.globalStall, io.busy) // [0]=busy, [1]=global_stall
@@ -220,8 +228,9 @@ class RegisterFile extends Module {
   io.axi.bresp.bits.resp := bRespReg
 
   val wIdxW = RegMap.idx(awAddrReg)
-  // Execution Lock: busy 이거나 fetch_working 중이면 Host의 DMA 영역 쓰기 금지
-  val hostWriteAllowed = Mux(isDmaRegion(wIdxW), !io.busy && !io.fetchWorking, true.B)
+  // Execution Lock: busy 이면 Host의 DMA 영역 쓰기 금지
+  // (fetch 구간도 Compute Initializer의 busy=1에 이미 포함되므로 별도 게이팅 불필요)
+  val hostWriteAllowed = Mux(isDmaRegion(wIdxW), !io.busy, true.B)
   val hostWriteFire    = io.axi.wdata.fire && wIdxW =/= RegMap.INT_STATUS.U && hostWriteAllowed
 
   switch(wState) {
@@ -252,21 +261,34 @@ class RegisterFile extends Module {
   // --------------------------------------------------------------------
   // 3-way 쓰기 우선순위 MUX (일반 레지스터, INT_STATUS 제외)
   //   우선순위: ① Interrupt Generator(단발성 이벤트, 유실 방지 최우선)
-  //            ② Command Fetcher/DMA (fetch_working 구간 동안 지속)
+  //            ② Command Fetcher/DMA (512bit beat 단위, 최대 8개 레지스터 동시 write)
   //            ③ Host AXI-Lite
-  //   주의: 같은 사이클에 ①이 발생하면 이번 사이클의 다른 인덱스에 대한
-  //         ②/③ 쓰기는 전부 드랍된다 (극히 드문 케이스로 가정, 우선 스켈레톤 수준)
+  //   주의: 같은 사이클에 ①이 발생하면 이번 사이클의 ②/③ 쓰기는 전부 드랍된다
+  //         (극히 드문 케이스로 가정, 우선 스켈레톤 수준)
   // --------------------------------------------------------------------
-  val irqWriteValid   = io.irqWen
-  val irqWriteIdx     = RegMap.idx(io.irqWaddr)
-
-  val fetchWriteValid = io.fetchWorking && io.fetchWrEn && isDmaRegion(RegMap.idx(io.fetchWrAddr))
-  val fetchWriteIdx   = RegMap.idx(io.fetchWrAddr)
+  val irqWriteValid = io.irqWen
+  val irqWriteIdx   = RegMap.idx(io.irqWaddr)
 
   when(irqWriteValid) {
     regs(irqWriteIdx) := io.irqWdata
-  } .elsewhen(fetchWriteValid) {
-    regs(fetchWriteIdx) := io.fetchWrData
+  } .elsewhen(io.fetchWen) {
+    // 512bit -> 64bit x 8 비트슬라이싱, chunk_idx에 따라 정해진 레지스터에 동시 기록
+    // (Beat2는 CHUNK2_IDX 1개만 유효, 나머지 448bit는 136Byte 초과 더미라 무시)
+    switch(io.fetchChunkIdx) {
+      is(0.U) {
+        RegMap.CHUNK0_IDX.zipWithIndex.foreach { case (regIdx, i) =>
+          regs(regIdx) := io.fetchWdata(64 * (i + 1) - 1, 64 * i)
+        }
+      }
+      is(1.U) {
+        RegMap.CHUNK1_IDX.zipWithIndex.foreach { case (regIdx, i) =>
+          regs(regIdx) := io.fetchWdata(64 * (i + 1) - 1, 64 * i)
+        }
+      }
+      is(2.U) {
+        regs(RegMap.CHUNK2_IDX.head) := io.fetchWdata(63, 0)
+      }
+    }
   } .elsewhen(hostWriteFire) {
     regs(wIdxW) := applyStrobe(regs(wIdxW), io.axi.wdata.bits.data, io.axi.wdata.bits.strb)
   }

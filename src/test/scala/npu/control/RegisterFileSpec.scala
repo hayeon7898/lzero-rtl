@@ -46,6 +46,12 @@ class RegisterFileSpec extends AnyFlatSpec with ChiselScalatestTester with Match
     result
   }
 
+  def idleFetchPorts(dut: RegisterFile): Unit = {
+    dut.io.fetchWen.poke(false.B)
+    dut.io.fetchChunkIdx.poke(0.U)
+    dut.io.fetchWdata.poke(0.U)
+  }
+
   def idleIrqPorts(dut: RegisterFile): Unit = {
     dut.io.setIntFlag.poke(false.B)
     dut.io.irqWen.poke(false.B)
@@ -53,10 +59,16 @@ class RegisterFileSpec extends AnyFlatSpec with ChiselScalatestTester with Match
     dut.io.irqWdata.poke(0.U)
   }
 
+  // 8개의 64bit 값을 명세서 순서대로(LSB lane 0) 512bit로 합침
+  def packBeat(lanes: Seq[BigInt]): BigInt = {
+    lanes.zipWithIndex.foldLeft(BigInt(0)) { case (acc, (v, i)) =>
+      acc | (v << (64 * i))
+    }
+  }
+
   it should "write RS1_REG via AXI-Lite and read it back, broadcast on io.rs1" in {
     test(new RegisterFile) { dut =>
-      dut.io.fetchWorking.poke(false.B)
-      dut.io.fetchWrEn.poke(false.B)
+      idleFetchPorts(dut)
       dut.io.busy.poke(false.B)
       dut.io.globalStall.poke(false.B)
       idleIrqPorts(dut)
@@ -67,28 +79,105 @@ class RegisterFileSpec extends AnyFlatSpec with ChiselScalatestTester with Match
     }
   }
 
-  it should "let Command Fetcher own DMA region write when fetch_working=1, ignore host write" in {
+  it should "load Beat 0 from DMA to RF Writer into the 8 pointer registers it maps to" in {
     test(new RegisterFile) { dut =>
-      dut.io.busy.poke(false.B)
+      dut.io.busy.poke(true.B) // 실제로는 struct load 구간이라 busy=1인 상태
       dut.io.globalStall.poke(false.B)
       idleIrqPorts(dut)
 
-      // fetch_working=1 상태에서 Command Fetcher가 INPUT_ADDR(0x20)에 씀
-      dut.io.fetchWorking.poke(true.B)
-      dut.io.fetchWrEn.poke(true.B)
-      dut.io.fetchWrAddr.poke(0x20.U)
-      dut.io.fetchWrData.poke("h1000_0000".U)
-      dut.clock.step(1)
-      dut.io.fetchWrEn.poke(false.B)
+      val lanes = Seq(
+        BigInt("1000000000000001", 16), // -> INPUT_ADDR (0x20)
+        BigInt("1000000000000002", 16), // -> WEIGHT1_ADDR (0x28)
+        BigInt("1000000000000003", 16), // -> WEIGHT2_ADDR (0x30)
+        BigInt("1000000000000004", 16), // -> QUANT_PARAM_ADDR (0x38)
+        BigInt("1000000000000005", 16), // -> ANGLE_PARAM_ADDR (0x40)
+        BigInt("1000000000000006", 16), // -> ACT_LUT_ADDR (0x48)
+        BigInt("1000000000000007", 16), // -> EXP_LUT_ADDR (0x50)
+        BigInt("1000000000000008", 16)  // -> SCALE_LUT_ADDR (0x58)
+      )
 
-      dut.io.pointers.inputAddr.expect("h1000_0000".U)
+      dut.io.fetchWen.poke(true.B)
+      dut.io.fetchChunkIdx.poke(0.U)
+      dut.io.fetchWdata.poke(packBeat(lanes).U)
+      dut.clock.step(1)
+      dut.io.fetchWen.poke(false.B)
+
+      dut.io.pointers.inputAddr.expect(lanes(0).U)
+      dut.io.pointers.weight1Addr.expect(lanes(1).U)
+      dut.io.pointers.weight2Addr.expect(lanes(2).U)
+      dut.io.pointers.quantParamAddr.expect(lanes(3).U)
+      dut.io.pointers.angleParamAddr.expect(lanes(4).U)
+      dut.io.pointers.actLutAddr.expect(lanes(5).U)
+      dut.io.pointers.expLutAddr.expect(lanes(6).U)
+      dut.io.pointers.scaleLutAddr.expect(lanes(7).U)
+    }
+  }
+
+  it should "load Beat 1 into remaining pointers + packed dimension registers" in {
+    test(new RegisterFile) { dut =>
+      dut.io.busy.poke(true.B)
+      dut.io.globalStall.poke(false.B)
+      idleIrqPorts(dut)
+
+      val ropeSin  = BigInt("AAAA000000000001", 16)
+      val ropeCos  = BigInt("AAAA000000000002", 16)
+      val outAddr  = BigInt("AAAA000000000003", 16)
+      val normBuf  = BigInt("AAAA000000000004", 16)
+      // DIM0 = outIntermNum[63:32] | outRowNum[31:0]
+      val dim0 = (BigInt(7) << 32) | BigInt(16)
+      // DIM1 = inTotalTiles[63:32] | outColNum[31:0]
+      val dim1 = (BigInt(9) << 32) | BigInt(8)
+      // DIM2 = outTotalTiles[63:32] | wtTotalTiles[31:0]
+      val dim2 = (BigInt(11) << 32) | BigInt(10)
+      // DIM3 = weightOffset[63:32] | inputOffset[31:0]
+      val dim3 = (BigInt(13) << 32) | BigInt(12)
+
+      val lanes = Seq(ropeSin, ropeCos, outAddr, normBuf, dim0, dim1, dim2, dim3)
+
+      dut.io.fetchWen.poke(true.B)
+      dut.io.fetchChunkIdx.poke(1.U)
+      dut.io.fetchWdata.poke(packBeat(lanes).U)
+      dut.clock.step(1)
+      dut.io.fetchWen.poke(false.B)
+
+      dut.io.pointers.ropeSinAddr.expect(ropeSin.U)
+      dut.io.pointers.ropeCosAddr.expect(ropeCos.U)
+      dut.io.pointers.outputAddr.expect(outAddr.U)
+      dut.io.pointers.normBuffAddr.expect(normBuf.U)
+
+      dut.io.dims.outRowNum.expect(16.U)
+      dut.io.dims.outIntermNum.expect(7.U)
+      dut.io.dims.outColNum.expect(8.U)
+      dut.io.dims.inTotalTiles.expect(9.U)
+      dut.io.dims.wtTotalTiles.expect(10.U)
+      dut.io.dims.outTotalTiles.expect(11.U)
+      dut.io.dims.inputOffset.expect(12.U)
+      dut.io.dims.weightOffset.expect(13.U)
+    }
+  }
+
+  it should "load Beat 2 - only lane 0 (OUTPUT_OFFSET reg) matters, rest is dummy padding" in {
+    test(new RegisterFile) { dut =>
+      dut.io.busy.poke(true.B)
+      dut.io.globalStall.poke(false.B)
+      idleIrqPorts(dut)
+
+      val outputOffset = BigInt(99)
+      val beat2Data = outputOffset // 상위 448bit(더미)는 0으로 둠 - 무시되는지 확인용
+
+      dut.io.fetchWen.poke(true.B)
+      dut.io.fetchChunkIdx.poke(2.U)
+      dut.io.fetchWdata.poke(beat2Data.U)
+      dut.clock.step(1)
+      dut.io.fetchWen.poke(false.B)
+
+      dut.io.dims.outputOffset.expect(99.U)
     }
   }
 
   it should "reject host write to DMA region (0x20~0xA0) when busy=1 with SLVERR" in {
     test(new RegisterFile) { dut =>
-      dut.io.fetchWorking.poke(false.B)
-      dut.io.fetchWrEn.poke(false.B)
+      idleFetchPorts(dut)
       dut.io.globalStall.poke(false.B)
       idleIrqPorts(dut)
 
@@ -106,8 +195,7 @@ class RegisterFileSpec extends AnyFlatSpec with ChiselScalatestTester with Match
 
   it should "implement W1C correctly on INT_FLAG_REG via set_intflag pulse" in {
     test(new RegisterFile) { dut =>
-      dut.io.fetchWorking.poke(false.B)
-      dut.io.fetchWrEn.poke(false.B)
+      idleFetchPorts(dut)
       dut.io.busy.poke(false.B)
       dut.io.globalStall.poke(false.B)
       idleIrqPorts(dut)
@@ -128,8 +216,7 @@ class RegisterFileSpec extends AnyFlatSpec with ChiselScalatestTester with Match
 
   it should "route Interrupt Generator zero-copy address write via irqWen to OUTPUT_ADDR (0x70)" in {
     test(new RegisterFile) { dut =>
-      dut.io.fetchWorking.poke(false.B)
-      dut.io.fetchWrEn.poke(false.B)
+      idleFetchPorts(dut)
       dut.io.busy.poke(false.B)
       dut.io.globalStall.poke(false.B)
       dut.io.setIntFlag.poke(false.B)

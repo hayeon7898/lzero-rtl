@@ -9,7 +9,7 @@
 ### ⚙️ Architecture 
 
 <p align="center">
-  <img src="docs/specs/overview/images/npu-overview-diagram-1.png" width="90%" alt="NPU 전체 아키텍처 다이어그램">
+  <img src="docs/specs/overview/images/npu-overview-diagram-1.png" width="100%" alt="NPU 전체 아키텍처 다이어그램">
 </p>
 
 #### Core Blocks

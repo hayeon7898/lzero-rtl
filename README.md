@@ -6,22 +6,22 @@
 - Chisel(Scala)로 작성되었습니다.
 ---
  
-### ⚙️ Architecture 
+## ⚙️ Architecture 
 
 <p align="center">
   <img src="docs/specs/overview/images/npu-overview-diagram-1.png" width="100%" alt="NPU 전체 아키텍처 다이어그램">
 </p>
 
-#### Core Blocks
+### Core Blocks
 1. Central Control Unit(Register File, rs1 Decoder, Accumulation Timer)
 2. DMA Unit
 3. Compute Unit(TPU, VPU Stage1/2, Transposer)
 4. OCM(Unified/Weight/VPU/Normalizer/Parameter Buffer)
 
-### 📄 Specs
+## 📄 Specs
 👉🏻 전체 명세서 목차와 구현 상태는 [`docs/specs/README.md`](docs/specs/README.md) 참고해주세요.
 
-### 👩🏻‍💻 My Implementation Part: Control Unit
+## 👩🏻‍💻 My Implementation Part: Control Unit
  
 | Module |Explanation| Source | Spec| Issue |
 | --- | --- | --- | --- |---|
@@ -122,7 +122,7 @@ Verilog 생성: 터미널에서 make gen 명령어를 실행합니다.
 
 ---
 
-### 🔤 Chisel
+## 🔤 Chisel
 
 Rocket-chip의 코어 로직을 이해하고 수정하려면 가장 먼저 Chisel(Scala 기반)에 익숙해져야 합니다. Verilog와 달리 객체 지향 및 함수형 프로그래밍 패러다임을 하드웨어 설계에 도입한 언어입니다.
 
@@ -134,7 +134,7 @@ Rocket-chip의 코어 로직을 이해하고 수정하려면 가장 먼저 Chise
 - [**Chisel Cheatsheet (PDF)**](https://github.com/freechipsproject/chisel-cheatsheet/releases/latest/download/chisel_cheatsheet.pdf)
   - **설명:** 자주 쓰이는 Chisel 문법을 한 장으로 요약한 치트시트입니다. 출력해서 모니터 옆에 붙여두는 것을 강력히 추천합니다.
 
-### 🚀 아키텍처 및 SoC 통합 (Rocket-chip & Chipyard)
+## 🚀 아키텍처 및 SoC 통합 (Rocket-chip & Chipyard)
 
 Chisel에 익숙해졌다면, Rocket-chip 본체의 구조를 파악하고 커스텀 하드웨어 가속기(Accelerator)를 붙이는 방법을 배웁니다.
 
@@ -145,7 +145,7 @@ Chisel에 익숙해졌다면, Rocket-chip 본체의 구조를 파악하고 커�
   - **설명:** 현재 전 세계적으로 Rocket-chip을 다룰 때 가장 많이 사용하는 SoC 제너레이터 프레임워크인 'Chipyard'의 공식 문서입니다.
   - **핵심 포인트:** 문서 내의 **"Customization"** 파트를 보면 **RoCC (Rocket Custom Coprocessor)** 인터페이스를 사용하여 나만의 가속기(Accelerator)를 코어에 직접 연결하는 방법이 상세히 나와 있습니다. PIM 또는 행렬 연산기 설계 시 필수적인 내용입니다.
 
-### 🚌 내부 버스 프로토콜 (Diplomacy & TileLink)
+## 🚌 내부 버스 프로토콜 (Diplomacy & TileLink)
 
 메모리 병목을 해결하거나 시스템 레벨의 병렬 처리를 설계하기 위해 반드시 알아야 하는 데이터 통신 규약입니다.
 
@@ -154,7 +154,7 @@ Chisel에 익숙해졌다면, Rocket-chip 본체의 구조를 파악하고 커�
 - [**Diplomacy Framework Tutorial**](https://www.google.com/search?q=https://chipyard.readthedocs.io/en/latest/TileLink-Diplomacy-Reference/Diplomacy.html)
   - **설명:** 파라미터 협상 프레임워크인 Diplomacy의 개념을 설명하는 문서입니다. 초기 진입 장벽이 매우 높지만, 모듈 간의 연결(Node)과 주소 공간(Address Map)을 자동으로 구성하기 위해 꼭 넘어야 할 산입니다.
 
-### 🖐🏻 대학 오픈 코스웨어 (Hands-on Labs)
+## 🖐🏻 대학 오픈 코스웨어 (Hands-on Labs)
 
 실제 아키텍처 수업에서 이 툴들을 사용하여 어떻게 과제를 진행하는지 직접 확인하고 실습해 볼 수 있습니다.
 

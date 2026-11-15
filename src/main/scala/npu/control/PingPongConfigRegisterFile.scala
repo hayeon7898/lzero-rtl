@@ -325,6 +325,6 @@ class PingPongConfigRegisterFile extends Module {
 }
 
 object PingPongConfigRegisterFileMain extends App {
-  circt.stage.ChiselStage.emitSystemVerilogFile(
+  _root_.circt.stage.ChiselStage.emitSystemVerilogFile(
     new PingPongConfigRegisterFile(), Array("--target-dir", "generated"))
 }

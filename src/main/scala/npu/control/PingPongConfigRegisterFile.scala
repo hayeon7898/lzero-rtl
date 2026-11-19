@@ -5,14 +5,18 @@ import chisel3.util._
 
 /*
  * ============================================================================
- *  PingPongConfigRegisterFile  (미래 확장 명세 · 2026-11-03 기준 구현)
+ *  PingPongConfigRegisterFile 
  * ============================================================================
  *  기존 RegisterFile의 task configuration(rs1, rs2, descriptor 0x20..0xA0)을
  *  동일한 두 bank로 복제하고, 1bit selector로 active/shadow 역할을 정한다.
  *    - 실행부는 active bank만 읽는다.
- *    - 모든 config write(Host / Command Fetcher / Interrupt Gen)는 shadow로만 간다.
- *    - swapConfig 1-cycle pulse에서 selector만 toggle (payload copy/clear 없음).
- *    - INT_FLAG_REG / STATUS_REG는 공통 1개 (swap과 무관).
+ *    - 실행 중에는 모든 config write(Host / Command Fetcher / Interrupt Gen)가 shadow로만 간다.
+ *    - instDone(실행 종료 pulse)이 오면 RF가 직접 다음 동작을 정한다.
+ *        shadow에 완성된 instruction이 있으면  -> selector만 toggle(swap), 다음 연산 시작
+ *        shadow가 비어 있으면                 -> reset 상태로 복귀(idle), 다음 instruction 대기
+ *    - idle(실행 중 instruction 없음)에서 instruction이 도착하면 active bank에 바로 쓰고
+ *      마지막 beat가 들어오는 즉시 시작한다. (reset 직후/비어서 복귀한 경우 active=bank0)
+ *    - INT_FLAG_REG / STATUS_REG는 공통 1개 (swap/reset 복귀와 무관).
  *
  *  이 파일은 원본 RegisterFile.scala(AXI4-Lite 버전)의 아래 정의를 그대로 재사용한다.
  *    RfParams, Axi4LiteSlaveIO, AxiResp, RfPointers, RfDims, RegMap
@@ -28,6 +32,14 @@ import chisel3.util._
  *  [A3] 정의되지 않은 주소: 읽으면 0, 쓰면 무시. (원본은 dead storage였음)
  *  [A4] 쓰기 중재는 원본 그대로 유지: irq > fetch > host. 상위 소스가 있는
  *       cycle에는 하위 소스 write가 통째로 드랍된다(원본의 기존 동작).
+ *  [A5] TODO(spec-confirm) "instruction이 완성됐다"의 기준은 Command Fetcher의
+ *       마지막 descriptor beat(fetchChunkIdx==2) 도착으로 둔다. (rs1/rs2는 그 전에 도착)
+ *  [A6] done 시점에 shadow가 미완성(rs1/rs2만 오고 descriptor 도중)이면 그 일부 write를
+ *       버리지 않는다. idle 복귀 후 그 bank가 "적재 중 bank"가 되어 나머지 beat가 같은
+ *       bank로 이어서 들어간다. 일부 write가 전혀 없을 때만 active=bank0으로 복귀하고
+ *       두 bank를 reset 값으로 지운다.
+ *  [A7] 복귀한 idle 상태에서 active 출력은 reset 값(0) 또는 적재 중인 값이다.
+ *       소비자는 activeValid / instStart로 유효 여부를 판단한다.
  * ============================================================================
  */
 
@@ -109,8 +121,8 @@ class PingPongConfigRegisterFile extends Module {
   val io = IO(new Bundle {
     val axi = new Axi4LiteSlaveIO(RfParams.addrWidth, RfParams.dataWidth)
 
-    // ---- 신규: bank 역할 교환 (1-cycle pulse) ----
-    val swapConfig = Input(Bool())
+    // ---- 신규: 실행 종료 (1-cycle pulse). swap/reset 복귀 판단은 RF 내부에서 한다 ----
+    val instDone = Input(Bool())
 
     // ---- 기존: Command Fetcher(DMA to RF Writer) 512bit beat write ----
     val fetchWen      = Input(Bool())
@@ -131,6 +143,9 @@ class PingPongConfigRegisterFile extends Module {
     val activeConfig            = Output(new InstructionConfig)
     val shadowDescriptorAddress = Output(UInt(64.W))
     val activeBankIndex         = Output(UInt(1.W))
+    val instStart               = Output(Bool()) // 새 active instruction 시작 (1-cycle pulse, config는 같은 cycle부터 유효)
+    val activeValid             = Output(Bool()) // false = reset/idle 대기
+    val shadowValid             = Output(Bool()) // 실행 중 shadow에 완성된 다음 instruction이 있음
 
     // ---- 기존 이름 호환 출력 (모두 active bank 기준) ----
     val rs1      = Output(UInt(64.W))
@@ -150,8 +165,16 @@ class PingPongConfigRegisterFile extends Module {
   val activeBankIndex = RegInit(0.U(1.W))
   val shadowBankIndex = ~activeBankIndex
 
+  val activeValid = RegInit(false.B) // active bank에 시작됐거나 실행 중인 instruction이 있는가 (false = idle)
+  val shadowValid = RegInit(false.B) // 실행 중, shadow에 완성된 다음 instruction이 있는가
+  val loadDirty   = RegInit(false.B) // 적재 대상 bank에 아직 소비 안 된(미완성/완성) instruction이 있는가
+
   val activeConfig = configBanks(activeBankIndex)
   val shadowConfig = configBanks(shadowBankIndex)
+
+  // 쓰기 대상: 실행 중이면 shadow, idle이면 active bank(= bank0 또는 적재 중이던 bank)
+  val writeBankIndex = Mux(activeValid, shadowBankIndex, activeBankIndex)
+  val writeConfig    = configBanks(writeBankIndex)
 
   // 공통 register
   val intFlagReg = RegInit(0.U(32.W))
@@ -159,22 +182,28 @@ class PingPongConfigRegisterFile extends Module {
   statusReg := Cat(0.U(30.W), io.globalStall, io.busy) // [0]=busy [1]=global_stall
 
   // --------------------------------------------------------------------
-  // swap: selector만 toggle. payload는 copy/clear하지 않는다.
+  // 종료 처리 판단 (조합). 상태 갱신은 config write 합성 뒤에서 한다.
+  //   lastBeat   : Command Fetcher 마지막 descriptor beat 도착 -> instruction 완성 [A5]
+  //   shadowReady: 실행 중 shadow가 완성됨 (done과 같은 cycle에 마지막 beat가 와도 인정)
   // --------------------------------------------------------------------
-  when(io.swapConfig) {
-    activeBankIndex := ~activeBankIndex
-  }
+  val doneFire     = io.instDone && activeValid
+  val fetchCfgFire = io.fetchWen && !io.irqWen          // irq > fetch 중재에서 안 밀린 fetch
+  val lastBeat     = fetchCfgFire && (io.fetchChunkIdx === 2.U)
+  val shadowReady  = shadowValid || (activeValid && lastBeat)
+  val swapFire     = doneFire && shadowReady            // 다음 instruction으로 전환
+  val resetFire    = doneFire && !shadowReady           // 비어 있음 -> reset 상태로 복귀
+  val idleStart    = !activeValid && lastBeat           // idle에서 instruction 완성 -> 바로 시작
 
   // --------------------------------------------------------------------
   // Host AXI4-Lite write FSM (원본 구조 유지, busy 차단/SLVERR 제거: [A2])
-  //   swap cycle에는 wdata.ready를 내려 "수락 자체를 막는다" (수락 후 드랍 금지)
+  //   done cycle(swap/reset 복귀)에는 wdata.ready를 내려 "수락 자체를 막는다" (수락 후 드랍 금지)
   // --------------------------------------------------------------------
   object WrState extends ChiselEnum { val wIdle, wData, wResp = Value }
   val wState    = RegInit(WrState.wIdle)
   val awAddrReg = Reg(UInt(RfParams.addrWidth.W))
 
   io.axi.awaddr.ready    := wState === WrState.wIdle
-  io.axi.wdata.ready     := (wState === WrState.wData) && !io.swapConfig
+  io.axi.wdata.ready     := (wState === WrState.wData) && !doneFire
   io.axi.bresp.valid     := wState === WrState.wResp
   io.axi.bresp.bits.resp := AxiResp.OKAY
 
@@ -218,8 +247,8 @@ class PingPongConfigRegisterFile extends Module {
     require(r - TaskDescriptorConfig.BaseRegIdx == 1 * 8 + s, "CHUNK1 mapping mismatch") }
   require(RegMap.CHUNK2_IDX.head - TaskDescriptorConfig.BaseRegIdx == 2 * 8, "CHUNK2 mapping mismatch")
 
-  val shadowWords = wordsOf(shadowConfig)
-  val irqIdx      = RegMap.idx(io.irqWaddr)
+  val writeWords = wordsOf(writeConfig)
+  val irqIdx     = RegMap.idx(io.irqWaddr)
 
   val wrEn   = Wire(Vec(NumCfgWords, Bool()))
   val wrData = Wire(Vec(NumCfgWords, UInt(64.W)))
@@ -227,9 +256,9 @@ class PingPongConfigRegisterFile extends Module {
   for (i <- 0 until NumCfgWords) {
     val r = CfgRegIdx(i)
     wrEn(i)   := false.B
-    wrData(i) := shadowWords(i) // 기본: 현재 shadow 값 유지
+    wrData(i) := writeWords(i) // 기본: 현재 쓰기 대상 bank 값 유지
 
-    when(io.irqWen) {                       // [A1] zero-copy 쓰기도 shadow
+    when(io.irqWen) {                       // [A1] zero-copy 쓰기도 쓰기 대상 bank(실행 중이면 shadow)
       wrEn(i)   := irqIdx === r.U
       wrData(i) := io.irqWdata
     } .elsewhen(io.fetchWen) {
@@ -242,18 +271,51 @@ class PingPongConfigRegisterFile extends Module {
       }
     } .elsewhen(hostWriteFire) {
       wrEn(i)   := wIdxW === r.U
-      wrData(i) := applyStrobe(shadowWords(i), io.axi.wdata.bits.data, io.axi.wdata.bits.strb)
+      wrData(i) := applyStrobe(writeWords(i), io.axi.wdata.bits.data, io.axi.wdata.bits.strb)
     }
   }
 
-  // 현재 shadow bank에만 적용. swap cycle에는 방어적으로 write enable도 gate.
+  // 쓰기 대상 bank에만 적용 (실행 중 = shadow, idle = active bank)
   for (b <- 0 until 2) {
-    val isShadow = shadowBankIndex === b.U
-    val words    = wordsOf(configBanks(b))
+    val isWriteBank = writeBankIndex === b.U
+    val words       = wordsOf(configBanks(b))
     for (i <- 0 until NumCfgWords) {
-      when(isShadow && wrEn(i) && !io.swapConfig) {
+      when(isWriteBank && wrEn(i)) {
         words(i) := wrData(i)
       }
+    }
+  }
+
+  // --------------------------------------------------------------------
+  // 상태 갱신: swap / reset 복귀 / idle 시작 / shadow 완성
+  //   instWrite: instruction 내용을 쓰는 write (fetch/host 중 실제 반영된 것). irq 쓰기는 제외 [A1]
+  // --------------------------------------------------------------------
+  val instWrite  = !io.irqWen && wrEn.asUInt.orR
+  val partialNow = loadDirty || instWrite // 쓰기 대상 bank에 미완성/미소비 내용이 있음 [A6]
+
+  when(instWrite) { loadDirty := true.B }
+
+  when(swapFire) {
+    activeBankIndex := ~activeBankIndex // selector만 toggle, payload는 copy/clear하지 않는다
+    shadowValid     := false.B
+    loadDirty       := false.B          // 방금 shadow가 소비됨 (activeValid는 true 유지)
+  } .elsewhen(resetFire) {
+    activeValid     := false.B
+    shadowValid     := false.B
+    loadDirty       := partialNow
+    // 일부 적재분이 있으면 그 bank(현재 shadow)를 적재 대상으로 채택, 없으면 bank0 복귀
+    activeBankIndex := Mux(partialNow, ~activeBankIndex, 0.U)
+  } .elsewhen(idleStart) {
+    activeValid     := true.B
+    loadDirty       := false.B
+  } .elsewhen(activeValid && lastBeat) {
+    shadowValid     := true.B
+  }
+
+  // reset 복귀 시 지우기: 적재분이 없으면 두 bank 모두, 있으면 끝난 옛 active bank만 (last-connect)
+  for (b <- 0 until 2) {
+    when(resetFire && (!partialNow || activeBankIndex === b.U)) {
+      configBanks(b) := 0.U.asTypeOf(new InstructionConfig)
     }
   }
 
@@ -304,6 +366,9 @@ class PingPongConfigRegisterFile extends Module {
   io.activeConfig            := activeConfig
   io.shadowDescriptorAddress := shadowConfig.descriptorAddress
   io.activeBankIndex         := activeBankIndex
+  io.instStart               := RegNext(swapFire || idleStart, false.B)
+  io.activeValid             := activeValid
+  io.shadowValid             := shadowValid
 
   io.rs1      := activeConfig.commandBits
   io.rs2      := activeConfig.descriptorAddress
@@ -316,12 +381,15 @@ class PingPongConfigRegisterFile extends Module {
   // --------------------------------------------------------------------
   // 계약 위반 검출 (simulation assertion)
   // --------------------------------------------------------------------
-  assert(!(io.swapConfig && RegNext(io.swapConfig, false.B)),
-    "swapConfig must be a 1-cycle pulse")
-  assert(!(io.swapConfig && io.fetchWen),
-    "swapConfig and Command Fetcher config write must not overlap")
-  assert(!(io.swapConfig && io.irqWen),
-    "swapConfig and Interrupt Generator config write must not overlap")
+  assert(!(io.instDone && RegNext(io.instDone, false.B)),
+    "instDone must be a 1-cycle pulse")
+  assert(!(io.instDone && !activeValid),
+    "instDone while idle (no running instruction)")
+  assert(!(doneFire && io.irqWen),
+    "instDone and Interrupt Generator config write must not overlap")
+  // swap cycle의 fetch는 "방금 완성되는 마지막 beat"만 허용 (그 외는 다음 instruction이 active를 오염)
+  assert(!(swapFire && io.fetchWen && (shadowValid || !lastBeat)),
+    "Command Fetcher write during swap is only allowed for the completing last beat")
 }
 
 object PingPongConfigRegisterFileMain extends App {
